@@ -1,2 +1,2 @@
 # VMCS
-Virtual Camera System for Blender
+Virtual Multi Camera System for Blender
