@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Tools",
     "author": "Hyuck Sang Lee, Multi-dimensional Insight Lab, Yonsei University",
-    "version": (2023, 1, 30),
+    "version": (2023, 2, 27),
     "blender": (3, 3, 2),
     "location": "Viewport > Right panel",
     "description": "Virtual Multi Camera Studio MDI Tools",
@@ -33,8 +33,8 @@ from bpy.types import ( PropertyGroup )
 
 def get_3x4_P_matrix_from_blender(cam):
     K = get_calibration_matrix_K_from_blender(cam.data)
-    RT = get_3x4_RT_matrix_from_blender(cam)
-    return K@RT, K, RT
+    RT, Rpytorch3d, Tpytorch3d = get_3x4_RT_matrix_from_blender(cam)
+    return K@RT, K, RT, Rpytorch3d, Tpytorch3d 
 
 
 def get_3x4_RT_matrix_from_blender(cam):
@@ -43,6 +43,15 @@ def get_3x4_RT_matrix_from_blender(cam):
         ((1, 0,  0),
         (0, -1, 0),
         (0, 0, -1)))
+    R_cv2py = mathutils.Matrix(
+        ((-1, 0,  0),
+        (0, -1, 0),
+        (0, 0, 1)))
+        
+#    R_bcam2cv = mathutils.Matrix(
+#        ((1, 0,  0),
+#        (0, 0, -1),
+#        (0, 1, 0)))
 
     # Transpose since the rotation is object rotation, 
     # and we want coordinate rotation
@@ -62,13 +71,20 @@ def get_3x4_RT_matrix_from_blender(cam):
     R_world2cv = R_bcam2cv@R_world2bcam
     T_world2cv = R_bcam2cv@T_world2bcam
 
+
+
     # put into 3x4 matrix
-    RT = mathutils.Matrix((
+    RTcv = mathutils.Matrix((
         R_world2cv[0][:] + (T_world2cv[0],),
         R_world2cv[1][:] + (T_world2cv[1],),
         R_world2cv[2][:] + (T_world2cv[2],)
         ))
-    return RT
+        
+        
+    Rpytorch3d = R_bcam2cv@R_world2bcam@R_cv2py
+    Tpytorch3d = T_world2cv
+        
+    return RTcv, Rpytorch3d, Tpytorch3d 
 
 
 def get_calibration_matrix_K_from_blender(camd):
@@ -120,58 +136,10 @@ def get_sensor_fit(sensor_fit, size_x, size_y):
             return 'VERTICAL'
     return sensor_fit
 
-def projection_mat_tmp(camera, render):
-        # Get the two components to calculate M
-    modelview_matrix = camera.matrix_world.inverted()
-    projection_matrix = camera.calc_matrix_camera(
-        bpy.data.scenes["Scene"].view_layers["View Layer"].depsgraph,
-        x = render.resolution_x,
-        y = render.resolution_y,
-        scale_x = render.pixel_aspect_x,
-        scale_y = render.pixel_aspect_y,
-    )
-    P = projection_matrix @ modelview_matrix
-    
-    return P
-
-
-
 def get_date():
     now = time.localtime()
     s = "%04d_%02d_%02d_%02d_%02d" % (now.tm_year, now.tm_mon, now.tm_mday, now.tm_hour, now.tm_min)
     return s
-
-def euler_to_rotVec(yaw, pitch, roll):
-    # compute the rotation matrix
-    Rmat = euler_to_rotMat(yaw, pitch, roll)
-    
-    theta = math.acos(((Rmat[0, 0] + Rmat[1, 1] + Rmat[2, 2]) - 1) / 2)
-    sin_theta = math.sin(theta)
-    if sin_theta < 1e-6:
-        rx, ry, rz = 0.0, 0.0, 0.0
-    else:
-        multi = 1 / (2 * math.sin(theta))
-        rx = multi * (Rmat[2, 1] - Rmat[1, 2]) * theta
-        ry = multi * (Rmat[0, 2] - Rmat[2, 0]) * theta
-        rz = multi * (Rmat[1, 0] - Rmat[0, 1]) * theta
-    return rx, ry, rz
-
-def euler_to_rotMat(yaw, pitch, roll):
-    Rz_yaw = np.array([
-        [np.cos(yaw), -np.sin(yaw), 0],
-        [np.sin(yaw),  np.cos(yaw), 0],
-        [          0,            0, 1]])
-    Ry_pitch = np.array([
-        [ np.cos(pitch), 0, np.sin(pitch)],
-        [             0, 1,             0],
-        [-np.sin(pitch), 0, np.cos(pitch)]])
-    Rx_roll = np.array([
-        [1,            0,             0],
-        [0, np.cos(roll), -np.sin(roll)],
-        [0, np.sin(roll),  np.cos(roll)]])
-    # R = RzRyRx
-    rotMat = np.dot(Rz_yaw, np.dot(Ry_pitch, Rx_roll))
-    return rotMat
 
   
 def save_RT(result_path, real = False): # M R L
@@ -206,7 +174,7 @@ def save_RT(result_path, real = False): # M R L
 
     for i, cam in enumerate([obj for obj in bpy.data.objects if obj.type == 'CAMERA']):
         bpy.context.scene.camera = cam
-        P, K, RT = get_3x4_P_matrix_from_blender(cam)      
+        P, K, RT, Rpytorch3d, Tpytorch3d  = get_3x4_P_matrix_from_blender(cam)      
             
         
         if real:
@@ -223,9 +191,9 @@ def save_RT(result_path, real = False): # M R L
         
         with open(result_path +'Calib/'+ format(i,"08")+"_cam.txt", 'w') as f:
             f.write("extrinsic\n")
-            f.write(str(round(RT[0][0], 6)) + ' ' + str(round(RT[0][1], 6)) + ' ' + str(round(RT[0][2], 6)) + ' ' + str(round(1000*RT[0][3], 6)) + '\n')
-            f.write(str(round(RT[1][0], 6)) + ' ' + str(round(RT[1][1], 6)) + ' ' + str(round(RT[1][2], 6)) + ' ' + str(round(1000*RT[1][3], 6)) + '\n')
-            f.write(str(round(RT[2][0], 6)) + ' ' + str(round(RT[2][1], 6)) + ' ' + str(round(RT[2][2], 6)) + ' ' + str(round(1000*RT[2][3], 6)) + '\n')
+            f.write(str(round(RT[0][0], 6)) + ' ' + str(round(RT[0][1], 6)) + ' ' + str(round(RT[0][2], 6)) + ' ' + str(round(RT[0][3], 6)) + '\n')
+            f.write(str(round(RT[1][0], 6)) + ' ' + str(round(RT[1][1], 6)) + ' ' + str(round(RT[1][2], 6)) + ' ' + str(round(RT[1][3], 6)) + '\n')
+            f.write(str(round(RT[2][0], 6)) + ' ' + str(round(RT[2][1], 6)) + ' ' + str(round(RT[2][2], 6)) + ' ' + str(round(RT[2][3], 6)) + '\n')
             f.write("0.0 0.0 0.0 1.0\n\nintrinsic\n")
             f.write(str(K[0][0]) + ' ' + str(K[0][1]) + ' ' + str(K[0][2]) + '\n')
             f.write(str(K[1][0]) + ' ' + str(K[1][1]) + ' ' + str(K[1][2]) + '\n')
@@ -234,6 +202,11 @@ def save_RT(result_path, real = False): # M R L
             f.write("\n900 1.5")
             f.close()    
         
+        np.save(result_path +'Calib/pytorch3d_R'+format(i,'02')+'.npy',np.array(Rpytorch3d,dtype = np.float32))
+        np.save(result_path +'Calib/pytorch3d_T'+format(i,'02')+'.npy',np.array(Tpytorch3d,dtype = np.float32))
+        np.save(result_path +'Calib/pytorch3d_K'+format(i,'02')+'.npy',np.array(K,dtype = np.float32))
+        
+        
     np.save(result_path +'Calib/Camera_matrix_RT_3X4_'+format(k,'02')+'.npy',RRTT)
     np.save(result_path +'Calib/Camera_matrix_P_'+format(k,'02')+'.npy',PP)
     np.save(result_path +'Calib/Camera_matrix_K_'+format(k,'02')+'.npy',KK)
@@ -241,48 +214,6 @@ def save_RT(result_path, real = False): # M R L
     scipy.io.savemat(result_path + 'Camera_matrix.mat', dict)
 
 
-
-
-def extrinsic_to_blender(rotation, translation):
-
-    print(rotation.dtype)
-    adjustment_mat = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
-    rotataion_matrix, _ = cv2.Rodrigues(rotation)
-    blender_camera_location = -rotataion_matrix.T @ translation
-    blender_camera_rotation = rotationMatrixToEulerAngles(
-        rotataion_matrix.T @ adjustment_mat
-    )
-    return blender_camera_rotation, blender_camera_location    
-# Checks if a matrix is a valid rotation matrix.
-def isRotationMatrix(R) :
-    Rt = np.transpose(R)
-    shouldBeIdentity = np.dot(Rt, R)
-    I = np.identity(3, dtype = R.dtype)
-    n = np.linalg.norm(I - shouldBeIdentity)
-    return n < 1e-4
-
-# Calculates rotation matrix to euler angles
-# The result is the same as MATLAB except the order
-# of the euler angles ( x and z are swapped ).
-def rotationMatrixToEulerAngles(R) :
-    #print(isRotationMatrix(R))
-    
-    assert(isRotationMatrix(R))
-
-    sy = math.sqrt(R[0,0] * R[0,0] +  R[1,0] * R[1,0])
-
-    singular = sy < 1e-6
-
-    if  not singular :
-        x = math.atan2(R[2,1] , R[2,2])
-        y = math.atan2(-R[2,0], sy)
-        z = math.atan2(R[1,0], R[0,0])
-    else :
-        x = math.atan2(-R[1,2], R[1,1])
-        y = math.atan2(-R[2,0], sy)
-        z = 0
-
-    return np.array([x, y, z])
 def update_endframe(self,context):
     bpy.context.scene.frame_end = self.end_frame
 
@@ -391,6 +322,7 @@ class PG_VMCSProperties(PropertyGroup):
 class ResetCamera(bpy.types.Operator):
     bl_idname = "scene.camera_reset"
     bl_label = "reset"
+    
     bl_description = ("Delete All Cameras")
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -540,6 +472,43 @@ class RealCameraLoad(bpy.types.Operator):
     
         return {'FINISHED'}
 
+
+class AlignCamera(bpy.types.Operator):
+    bl_idname = "scene.aligncamera"
+    bl_label = "Align"
+    bl_description = ("Align Real Cameras World coordinate")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        mid_point = [0,0,0]
+        k = 0
+        for i, cam in enumerate([obj for obj in bpy.data.objects if obj.type == 'CAMERA']):
+            
+            mid_point += np.array(cam.location)
+            k += 1
+        mid_point = mid_point/k 
+        print(mid_point)
+        
+        for i, cam in enumerate([obj for obj in bpy.data.objects if obj.type == 'CAMERA']):
+            cam.location = np.array(cam.location) - mid_point
+        
+        
+        bpy.ops.object.select_all(action='DESELECT')
+        for i, cam in enumerate([obj for obj in bpy.data.objects if obj.type == 'CAMERA']):
+            cam.select_set(True)
+            if i == 0:
+                ref = np.array(cam.rotation_euler)
+                rot_x = ref[0] -  1.570796327
+        bpy.ops.transform.rotate(value=rot_x, orient_axis='X', orient_type='GLOBAL')
+
+        
+        
+    
+        return {'FINISHED'}
+
+
+
+
 class PG_RMCSProperties(PropertyGroup):
 
     calib_file: bpy.props.StringProperty(
@@ -607,6 +576,8 @@ class VMCS_PT_Tools(bpy.types.Panel):
         col.separator()
         col.operator("scene.show_camera_matrix", text="Show Intrinsic Active Camera")
         col.separator()
+        col.operator("scene.aligncamera", text="Align Camera")
+        col.separator()
         col.separator()
         col.label(text="Extract Camera Matrixs")
         col.prop(context.window_manager.rt_tool, "type")
@@ -622,293 +593,7 @@ class VMCS_PT_Tools(bpy.types.Panel):
 
 
 
-def change_name(result_path, file_name, n, n4, n9, n3, n12):
-    if n4:    
-        file_oldname = os.path.join(result_path + "/Depth", "Image"+ format(n,"04")+".png")
-        file_newname_newfile = os.path.join(result_path + "/Depth", file_name + "_depth.png")
-        os.rename(file_oldname, file_newname_newfile)
-    if n9:
-        file_oldname = os.path.join(result_path + "/Noise", "Image"+ format(n,"04")+".png")
-        file_newname_newfile = os.path.join(result_path + "/Noise", file_name + ".png")
-        os.rename(file_oldname, file_newname_newfile)
-    if n3:
-        img = cv2.imread(result_path+ "/Mask/" + "Image"+ format(n,"04") +'.png',cv2.IMREAD_UNCHANGED)
-        ret, mask = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY)
-        cv2.imwrite(result_path+'Mask/'+file_name +'_mask.png',mask)
-    if n12:
-        file_oldname = os.path.join(result_path + "/Diffuse", "Image"+ format(n,"04")+".png")
-        file_newname_newfile = os.path.join(result_path + "/Diffuse", file_name + ".png")
-        os.rename(file_oldname, file_newname_newfile)
-        
 
-class DataSaverMainPanel(bpy.types.Panel):
-    bl_label = "Data Saver"
-    bl_idname = "Data_Saver_MAINPANEL"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Data Saver"
-
-    def draw(self, context):
-        layout = self.layout
-        
-        row = layout.row()
-        row.label(text= "Data Save Setting")
-        
-        row = layout.row()
-        row.operator('data_saver.set_operator')
-        row = layout.row()
-        row.operator('composite.set_operator')
-
-class CompositeSetting_PT_CONTROL(bpy.types.Operator):
-    bl_label = "Composite Setting Load"
-    bl_idname = 'composite.set_operator'
-
-    def execute(self, context):
-        bpy.context.scene.use_nodes = True
-        bpy.context.scene.view_layers["ViewLayer"].use_pass_z = True
-        bpy.context.scene.view_layers["ViewLayer"].use_pass_diffuse_color = True
-
-        # Get the compositing node tree in the target file
-        compositing_tree = bpy.context.scene.node_tree
-
-
-        file_output_node = compositing_tree.nodes.new("CompositorNodeOutputFile")
-        file_output_node.name = "File Output"
-        file_output1_node = compositing_tree.nodes.new("CompositorNodeOutputFile")
-        file_output1_node.name = "File Output.001"
-        file_output2_node = compositing_tree.nodes.new("CompositorNodeOutputFile")
-        file_output2_node.name = "File Output.002"
-        file_output3_node = compositing_tree.nodes.new("CompositorNodeOutputFile")
-        file_output3_node.name = "File Output.003"
-
-        blur_node = compositing_tree.nodes.new("CompositorNodeBlur")
-        
-        defocus_node = compositing_tree.nodes.new("CompositorNodeDefocus")
-        
-        map_node = compositing_tree.nodes.new("CompositorNodeMapRange")
-        normalize_node = compositing_tree.nodes.new("CompositorNodeNormalize")
-        map_node = compositing_tree.nodes.new("CompositorNodeGamma")
-        color_ramp_node = compositing_tree.nodes.new("CompositorNodeValToRGB")
-        setalpha_node = compositing_tree.nodes.new("CompositorNodeSetAlpha")
-
-        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["Gamma"].inputs[0])
-        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[1],bpy.data.scenes['Scene'].node_tree.nodes["File Output.002"].inputs[0])
-        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[2],bpy.data.scenes['Scene'].node_tree.nodes["Map Range"].inputs[0])
-        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[2],bpy.data.scenes['Scene'].node_tree.nodes["Normalize"].inputs[0])
-        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[3],bpy.data.scenes['Scene'].node_tree.nodes["Set Alpha"].inputs[0])
-        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Set Alpha"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["File Output.003"].inputs[0])
-        
-        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Normalize"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["ColorRamp"].inputs[0])
-        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["ColorRamp"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["Defocus"].inputs[1])
-        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Gamma"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["Defocus"].inputs[0])
-        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Gamma"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["Blur"].inputs[0])
-        
-        bpy.data.scenes["Scene"].node_tree.nodes["Map Range"].inputs[2].default_value = 3
-        bpy.data.scenes["Scene"].node_tree.nodes['File Output'].format.compression = 50
-        bpy.data.scenes["Scene"].node_tree.nodes['File Output.001'].format.compression = 50
-        bpy.data.scenes["Scene"].node_tree.nodes['File Output.003'].format.compression = 50
-        bpy.data.scenes["Scene"].node_tree.nodes['File Output.002'].format.compression = 100
-        
-        
-        # Save the target blend file
-        bpy.ops.wm.save_mainfile()
-        
-        return{'FINISHED'}   
-
-class DataSaveSetting_PT_CONTROL(bpy.types.Operator):
-    bl_label = "Data Save"
-    bl_idname = 'data_saver.set_operator'
-
-
-
-    number1: bpy.props.IntProperty(name= "View point (0 is Multi)", default = 0)
-    number11: bpy.props.BoolProperty(name= "Image", default = 1)
-    
-    number2: bpy.props.BoolProperty(name= "Camera matrix", default = 1)
-    
-    number3: bpy.props.BoolProperty(name= "Mask", default = 1)
-    number4: bpy.props.BoolProperty(name= "Depth", default = 1)
-    
-    number8: bpy.props.BoolProperty(name= "Obj", default = 1)
-    
-    number12:bpy.props.BoolProperty(name= "Diffuse", default = 0) 
-    number10: bpy.props.BoolProperty(name= "With HDR background", default = 0)
-    
-    number9: bpy.props.BoolProperty(name= "Noise image", default = 0)
-    number5: bpy.props.IntProperty(name= "Start Frame", default = 0)
-    
-    
-    number6: bpy.props.IntProperty(name= "Number of Frame", default = 0)
-
-    number7: bpy.props.StringProperty(name= "Folder Name", default = "Virtual_result")
-
-
-    
-    
-    def execute(self, context):
-        path = os.path.dirname(bpy.data.filepath) +'/'
-        n1 = self.number1
-        n2 = self.number2
-        n3 = self.number3
-        n4 = self.number4
-        n5 = self.number5
-        n6 = self.number6
-        n7 = self.number7
-        n8 = self.number8
-        n9 = self.number9
-        n10 = self.number10
-        n11 = self.number11
-        n12 = self.number12
-        
-        
-        if n1 == 0: #multi view
-            date = get_date()
-            result_path = path + "Rendered_Results/" + n7 + "_multi_view_" + date + "/"
-            if not os.path.exists(result_path):
-                os.makedirs(result_path)
-                if n8:
-                    os.makedirs(result_path +'obj/') 
-                if n2:
-                    os.makedirs(result_path +'Calib/')         
-                if n4:
-                    os.makedirs(result_path +'Depth/')
-                    bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Map Range"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["File Output"].inputs[0])
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output"].base_path = result_path + "/Depth" 
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output"].format.color_mode = 'BW'
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output"].format.color_depth = '16'
-                else:
-                    bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Map Range"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["File Output"].inputs[0]) 
-                    l = bpy.data.scenes['Scene'].node_tree.nodes["Map Range"].outputs[0].links[0]
-                    bpy.data.scenes["Scene"].node_tree.links.remove(l)
-                    
-                if n9:
-                    os.makedirs(result_path +'Noise/')     
-                    bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Defocus"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["File Output.001"].inputs[0])
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output.001"].base_path = result_path + "/Noise"
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output.001"].format.color_mode = 'RGBA'
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output.001"].format.color_depth = '8'  
-            
-                else:
-                    bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Defocus"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["File Output.001"].inputs[0]) 
-                    l = bpy.data.scenes['Scene'].node_tree.nodes["Defocus"].outputs[0].links[0]
-                    bpy.data.scenes["Scene"].node_tree.links.remove(l)
-                    
-                if n10:
-                    os.makedirs(result_path +'With_background/')     
-                
-                
-                if n3:
-                    os.makedirs(result_path +'Mask/')
-                    bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[1],bpy.data.scenes['Scene'].node_tree.nodes["File Output.002"].inputs[0])
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output.002"].base_path = result_path + "/Mask" 
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output.002"].format.color_mode = 'BW'
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output.002"].format.color_depth = '8'
-                else:
-                    bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[1],bpy.data.scenes['Scene'].node_tree.nodes["File Output.002"].inputs[0]) 
-                    l = bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[1].links[0]
-                    bpy.data.scenes["Scene"].node_tree.links.remove(l)
-                    
-                if n12:
-                    os.makedirs(result_path +'Diffuse/')
-                    bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[3],bpy.data.scenes['Scene'].node_tree.nodes["Set Alpha"].inputs[0])
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output.003"].base_path = result_path + "/Diffuse" 
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output.003"].format.color_mode = 'RGBA'
-                    bpy.data.scenes['Scene'].node_tree.nodes["File Output.003"].format.color_depth = '8'  
-
-                else:
-                    bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[3],bpy.data.scenes['Scene'].node_tree.nodes["Set Alpha"].inputs[0]) 
-                    l = bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[3].links[0]
-                    bpy.data.scenes["Scene"].node_tree.links.remove(l)
-            
-                    
-            if n2:       
-                save_RT(result_path) 
-
-            bpy.data.scenes['Scene'].frame_current = n5   
-                                   
-            
-            for i in range(n6 + 1):
-                bpy.data.scenes['Scene'].frame_current= n5 + i
-                
-             
-                if n8:
-                    target_file = os.path.join(result_path+ 'obj/', 'Position'+format(i,'06')+'.obj')
-                    bpy.ops.export_scene.obj(filepath=target_file, use_selection=True, use_materials=False, axis_forward = 'Y' , axis_up = 'Z')
-                
-                for k, cam in enumerate([obj for obj in bpy.data.objects if obj.type == 'CAMERA']):
-                     
-                    bpy.context.scene.camera = cam
-                    bpy.context.scene.render.film_transparent = True #no background (hdr)
-                    
-                    
-                    if n4:
-                        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Map Range"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["File Output"].inputs[0])
-                    else:
-                        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Map Range"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["File Output"].inputs[0]) 
-                        l = bpy.data.scenes['Scene'].node_tree.nodes["Map Range"].outputs[0].links[0]
-                        bpy.data.scenes["Scene"].node_tree.links.remove(l)
-                    
-                    if n9:   
-                        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Defocus"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["File Output.001"].inputs[0]) 
-                        gamma_val = random.gauss(1.0, 0.5)
-                        if gamma_val <0.7:
-                            gamma_val = -gamma_val + 2
-                        
-                        
-                        defocus1 = 1-abs(random.gauss(0.0, 0.3))
-                        defocus2 = abs(random.gauss(0.0, 5))
-                        bpy.data.scenes["Scene"].node_tree.nodes["Gamma"].inputs[1].default_value = gamma_val
-                        bpy.data.scenes["Scene"].node_tree.nodes["ColorRamp"].color_ramp.elements[1].position = defocus1
-                        bpy.data.scenes["Scene"].node_tree.nodes["Defocus"].z_scale = defocus2
-                    else:
-                        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Defocus"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["File Output.001"].inputs[0]) 
-                        l = bpy.data.scenes['Scene'].node_tree.nodes["Defocus"].outputs[0].links[0]
-                        bpy.data.scenes["Scene"].node_tree.links.remove(l)
-                    
-                    if n3:
-                        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[1],bpy.data.scenes['Scene'].node_tree.nodes["File Output.002"].inputs[0])
-                    else:
-                        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[1],bpy.data.scenes['Scene'].node_tree.nodes["File Output.002"].inputs[0]) 
-                        l = bpy.data.scenes['Scene'].node_tree.nodes["Render Layers"].outputs[1].links[0]
-                        bpy.data.scenes["Scene"].node_tree.links.remove(l)
-                    
-                        
-
-                    
-                    file_name = "Position"+ format(i,'06')+"_CAM" +format(k,'02')
-                    bpy.context.scene.render.image_settings.color_mode = 'RGBA'
-                    bpy.context.scene.render.image_settings.color_depth = '8'
-                    bpy.context.scene.render.filepath = os.path.join(result_path, file_name)
-                    bpy.ops.render.render(write_still=n11)
-                    change_name(result_path, file_name, n5 + i, n4, n9, n3, n12)
-                    if n10:
-                        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Map Range"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["File Output"].inputs[0]) 
-                        l = bpy.data.scenes['Scene'].node_tree.nodes["Map Range"].outputs[0].links[0]
-                        bpy.data.scenes["Scene"].node_tree.links.remove(l)
-                        
-                        bpy.data.scenes["Scene"].node_tree.links.new(bpy.data.scenes['Scene'].node_tree.nodes["Defocus"].outputs[0],bpy.data.scenes['Scene'].node_tree.nodes["File Output.001"].inputs[0]) 
-                        l = bpy.data.scenes['Scene'].node_tree.nodes["Defocus"].outputs[0].links[0]
-                        bpy.data.scenes["Scene"].node_tree.links.remove(l)
-                        
-                        
-                        
-                        bpy.context.scene.render.film_transparent = False #With background 
-                        bpy.context.scene.render.image_settings.color_mode = 'RGBA'
-                        bpy.context.scene.render.filepath = os.path.join(result_path+ 'With_background/', file_name)
-                        bpy.ops.render.render(write_still=True)
-            
-                if os.path.exists(result_path + "/Mask/Image" + format(n5 + i,"04")+".png"):         
-                    os.remove(result_path + "/Mask/Image" + format(n5 + i,"04")+".png")                    
-                if os.path.exists(result_path + "/Diffuse/Image" + format(n5 + i,"04")+".png"):         
-                    os.remove(result_path + "/Diffuse/Image" + format(n5 + i,"04")+".png")     
-                    
-                    
-                        
-                    
-    
-
-        
-        return{'FINISHED'}
 
     def invoke(self, context, event):
         wm = context.window_manager
@@ -968,6 +653,7 @@ classes = [
     RTKProperties,
     CameraAdd,
     RealCameraLoad,
+    AlignCamera,
     ResetCamera,
     ExtractCameraMatrix,
     ShowCameraMatrix,
@@ -982,10 +668,7 @@ classes = [
 #    FlameResetPose,
 #    FlameCloseMesh,
 #    FlameRestoreMesh,
-    VMCS_PT_Tools,
-    DataSaverMainPanel,
-    DataSaveSetting_PT_CONTROL,
-    CompositeSetting_PT_CONTROL
+    VMCS_PT_Tools
 ]
 
 def register():
